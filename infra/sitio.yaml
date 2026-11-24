@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Sitio estatico privado servido por CloudFront (nivel excelente).
+  Bucket S3 con bloqueo de acceso publico + Origin Access Control (OAC)
+  + politica de cabeceras de respuesta con CORS. La misma plantilla sirve
+  para el shell, el editor y el viewer, cada uno en su propia cuenta.
+
+Parameters:
+  NombreBucket:
+    Type: String
+    Description: Nombre unico global, p. ej. mfe-editor-rios1234
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+    ConstraintDescription: minusculas, numeros y guiones; de 3 a 63 caracteres
+  OrigenPermitido:
+    Type: String
+    Default: '*'
+    Description: >
+      Origen que puede importar los modulos (CORS). '*' para empezar;
+      luego, el dominio del shell, p. ej. https://d1234abcd.cloudfront.net
+
+Resources:
+  # ---------- Bucket PRIVADO: nadie lo lee salvo la distribucion ----------
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref NombreBucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # ---------- OAC: CloudFront firma sus peticiones al bucket ----------
+  Oac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${NombreBucket}-oac'
+        Description: Acceso privado de CloudFront al bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ---------- CORS resuelto en CloudFront, no en S3 ----------
+  # Sin esto el navegador bloquea el import() del modulo desde el shell,
+  # que vive en otro dominio.
+  CorsPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-cors'
+        Comment: CORS para importar los modulos desde el shell
+        CorsConfig:
+          AccessControlAllowCredentials: false
+          AccessControlAllowHeaders:
+            Items: ['*']
+          AccessControlAllowMethods:
+            Items: [GET, HEAD, OPTIONS]
+          AccessControlAllowOrigins:
+            Items: [!Ref OrigenPermitido]
+          AccessControlMaxAgeSec: 3000
+          OriginOverride: true
+        SecurityHeadersConfig:
+          ContentTypeOptions:
+            Override: true
+
+  # ---------- Distribucion: HTTPS, HTTP/2 y HTTP/3 ----------
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${AWS::StackName} (${NombreBucket})'
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: s3
+            DomainName: !GetAtt Bucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt Oac.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # Managed-CachingOptimized: respeta el Cache-Control de cada objeto.
+          # Los archivos con hash llevan max-age de un año; las entradas
+          # estables y los JSON, 60 s (y se invalidan al publicar).
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref CorsPolicy
+
+  # ---------- Politica del bucket: SOLO esta distribucion puede leer ----------
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SoloCloudFrontConOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${Bucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+Outputs:
+  Url:
+    Description: URL publica (HTTPS) de esta pieza
+    Value: !Sub 'https://${Distribution.DomainName}'
+  DistributionId:
+    Description: ID de la distribucion (para invalidar)
+    Value: !Ref Distribution
+  Bucket:
+    Description: Bucket privado de origen
+    Value: !Ref Bucket
+  OacId:
+    Description: Origin Access Control
+    Value: !GetAtt Oac.Id
+  CorsPolicyId:
+    Description: Politica de cabeceras de respuesta con CORS
+    Value: !Ref CorsPolicy

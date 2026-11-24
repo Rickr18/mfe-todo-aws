@@ -1,0 +1,8 @@
+{
+  "mfes": [
+    { "name": "todo-editor", "tag": "todo-editor", "slot": "slot-editor",
+      "url": "http://localhost:4001/todo-editor.js" },
+    { "name": "todo-viewer", "tag": "todo-viewer", "slot": "slot-viewer",
+      "url": "http://localhost:4002/todo-viewer.js" }
+  ]
+}
